@@ -1,0 +1,158 @@
+---
+title: "Supply Chain Transparency - Coffee"
+author: "Laura Del Duca"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo=TRUE)
+```
+
+Step 1: Create PostgreSQL database. Two tables: 'nodes', 'flows'.  
+Step 2: Import data into database.  
+Step 3: Data summary.  
+Step 4: Visualize data.  
+
+
+### Step 1: Create PostgreSQL database
+
+Create the PostgreSQL database ‘csc’ using pgAdmin 4.
+
+```sql
+CREATE DATABASE csc
+    WITH 
+    OWNER = postgres
+    ENCODING = 'UTF8'
+    LC_COLLATE = 'C'
+    LC_CTYPE = 'C'
+    TABLESPACE = pg_default
+    CONNECTION LIMIT = -1;
+
+CREATE TYPE noty AS ENUM ('production region', 'port of export', 'exporter', 'shipper',             \
+'importer', 'port of import', 'country of import');
+
+CREATE TABLE nodes (
+    node_id serial,
+    node_name character varying(255),
+    node_type noty,
+    PRIMARY KEY (node_id)
+);
+
+CREATE TABLE flows (
+	path integer[],
+	volume integer, 
+	PRIMARY KEY (path)
+);
+```
+
+### Step 2: Import data into database
+
+
+```{r}
+if(!require(DBI)) install.packages('DBI')
+library(DBI)
+if(!require(RPostgreSQL)) install.packages('RPostgreSQL')
+library(RPostgreSQL)
+if(!require(dplyr)) install.packages('dplyr')
+library(dplyr)
+
+# create connection
+# save password 'pw'
+pw <- {"superuser"}
+# load PostgreSQL driver 'drv'
+drv <- dbDriver("PostgreSQL")
+# create connection 'con' to postgres database 'csc'
+con <- dbConnect(drv, dbname = "csc", host = "localhost", port = 5432,
+                 user = "postgres", password = pw)
+# remove password
+rm(pw) 
+
+# check for 'nodes' table
+dbExistsTable(con, "nodes")
+# TRUE
+# check for 'flows' table
+dbExistsTable(con, "flows")
+# TRUE
+
+# saved File#1.xlsx as File#1.csv, and deleted empty rows in File#1.csv
+# import dataset "File#1.csv"
+cofdata <- read.csv(file="File#1.csv", header=TRUE)
+cofdata <- head(cofdata, 50)  # R session is aborted when running expand.grid, so test with less data
+
+
+# 'nodes'
+# n_name: unique nodes from columns PRODUCTION.REGION, LOCAL.PORT, LOCAL.TRADER, CARRIER, 
+# FOREIGN.TRADER, FOREIGN.PORT, CODE.COUNTRY
+n_name <- c(unique(as.character(cofdata$PRODUCTION.REGION)), 
+           unique(as.character(cofdata$LOCAL.PORT)), 
+           unique(as.character(cofdata$LOCAL.TRADER)), 
+           unique(as.character(cofdata$CARRIER)), 
+           unique(as.character(cofdata$FOREIGN.TRADER)), 
+           unique(as.character(cofdata$FOREIGN.PORT)), 
+           unique(as.character(cofdata$CODE.COUNTRY))
+           )
+# n_type: 'production region', 'port of export', 'exporter', 'shipper', 'importer', 
+# 'port of import', 'country of import'
+n_type <- c(rep('production region', n_distinct(as.character(cofdata$PRODUCTION.REGION))), 
+           rep('port of export', n_distinct(as.character(cofdata$LOCAL.PORT))), 
+           rep('exporter', n_distinct(as.character(cofdata$LOCAL.TRADER))), 
+           rep('shipper', n_distinct(as.character(cofdata$CARRIER))), 
+           rep('importer', n_distinct(as.character(cofdata$FOREIGN.TRADER))), 
+           rep('port of import', n_distinct(as.character(cofdata$FOREIGN.PORT))), 
+           rep('country of import', n_distinct(as.character(cofdata$CODE.COUNTRY)))
+           )
+# n_id
+n_id <- c(1:length(n_name))
+# create data.frame 'nt'
+nt <- data.frame(node_id = n_id,
+                 node_name = n_name,
+                 node_type = n_type,
+                 row.names = NULL)
+# write 'nt' to 'nodes'
+dbWriteTable(con, "nodes", value = nt, overwrite = TRUE, row.names = FALSE)
+
+# 'flows'
+# 'paths': use expand.grid to get all combinations of node_id by node_type
+pas <- expand.grid(nt$node_id[nt$node_name%in%unique(as.character(cofdata$PRODUCTION.REGION))], 
+                   nt$node_id[nt$node_name%in%unique(as.character(cofdata$LOCAL.PORT))], 
+                   nt$node_id[nt$node_name%in%unique(as.character(cofdata$LOCAL.TRADER))],
+                   nt$node_id[nt$node_name%in%unique(as.character(cofdata$CARRIER))], 
+                   nt$node_id[nt$node_name%in%unique(as.character(cofdata$FOREIGN.TRADER))], 
+                   nt$node_id[nt$node_name%in%unique(as.character(cofdata$FOREIGN.PORT))], 
+                   nt$node_id[nt$node_name%in%unique(as.character(cofdata$CODE.COUNTRY))]
+                   )
+# 'volume'
+vol <- c()
+for (i in pas) {
+    v <- 0
+    # need to fix v
+    for (row in cofdata) {
+        v <- v + cofdata$WEIGHT..KG.[
+            pas$Var1 == nt$node_id[nt$node_name%in%cofdata$PRODUCTION.REGION] &
+            pas$Var2 == nt$node_id[nt$node_name%in%cofdata$LOCAL.PORT] &
+            pas$Var3 == nt$node_id[nt$node_name%in%cofdata$LOCAL.TRADER] &
+            pas$Var4 == nt$node_id[nt$node_name%in%cofdata$CARRIER] &
+            pas$Var5 == nt$node_id[nt$node_name%in%cofdata$FOREIGN.TRADER] &
+            pas$Var6 == nt$node_id[nt$node_name%in%cofdata$FOREIGN.PORT] &
+            pas$Var7 == nt$node_id[nt$node_name%in%cofdata$CODE.COUNTRY]]
+    }
+    vol <- c(vol, v/1000)
+}
+
+# need to convert data.frame pas to vector of numeric vectors
+# need to fix NA
+
+# create data.frame 'ft' 
+ft <- data.frame(paths = pas,
+                 volume = vol,
+                 row.names = NULL)
+# drop rows where 'volume' == 0  (drop paths that are not in 'File#1.csv')
+ft <- ft[!(ft$volume==0),]
+# write 'ft' to 'flows'
+dbWriteTable(con, "flows", value = ft, overwrite = TRUE, row.names = FALSE)
+
+
+# close connection
+on.exit(dbDisconnect(con))
+
+```
